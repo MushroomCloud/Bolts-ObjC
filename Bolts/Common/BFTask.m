@@ -295,15 +295,20 @@ NSString *const BFTaskMultipleExceptionsUserInfoKey = @"exceptions";
 }
 
 - (BOOL)trySetResult:(nullable id)result {
+    NSArray *callbacks = nil;
     @synchronized(self.lock) {
         if (self.completed) {
             return NO;
         }
         self.completed = YES;
         _result = result;
-        [self runContinuations];
-        return YES;
+
+        callbacks = [self getAndResetContinuations];
     }
+    for (void (^callback)() in callbacks) {
+        callback();
+    }
+    return YES;
 }
 
 - (nullable NSError *)error {
@@ -313,6 +318,7 @@ NSString *const BFTaskMultipleExceptionsUserInfoKey = @"exceptions";
 }
 
 - (BOOL)trySetError:(NSError *)error {
+    NSArray *callbacks = nil;
     @synchronized(self.lock) {
         if (self.completed) {
             return NO;
@@ -320,9 +326,13 @@ NSString *const BFTaskMultipleExceptionsUserInfoKey = @"exceptions";
         self.completed = YES;
         self.faulted = YES;
         _error = error;
-        [self runContinuations];
-        return YES;
+
+        callbacks = [self getAndResetContinuations];
     }
+    for (void (^callback)() in callbacks) {
+        callback();
+    }
+    return YES;
 }
 
 - (nullable NSException *)exception {
@@ -332,6 +342,7 @@ NSString *const BFTaskMultipleExceptionsUserInfoKey = @"exceptions";
 }
 
 - (BOOL)trySetException:(NSException *)exception {
+    NSArray *callbacks = nil;
     @synchronized(self.lock) {
         if (self.completed) {
             return NO;
@@ -339,9 +350,13 @@ NSString *const BFTaskMultipleExceptionsUserInfoKey = @"exceptions";
         self.completed = YES;
         self.faulted = YES;
         _exception = exception;
-        [self runContinuations];
-        return YES;
+
+        callbacks = [self getAndResetContinuations];
     }
+    for (void (^callback)() in callbacks) {
+        callback();
+    }
+    return YES;
 }
 
 - (BOOL)isCancelled {
@@ -357,15 +372,20 @@ NSString *const BFTaskMultipleExceptionsUserInfoKey = @"exceptions";
 }
 
 - (BOOL)trySetCancelled {
+    NSArray *callbacks = nil;
     @synchronized(self.lock) {
         if (self.completed) {
             return NO;
         }
         self.completed = YES;
         self.cancelled = YES;
-        [self runContinuations];
-        return YES;
+
+        callbacks = [self getAndResetContinuations];
     }
+    for (void (^callback)() in callbacks) {
+        callback();
+    }
+    return YES;
 }
 
 - (BOOL)isCompleted {
@@ -374,16 +394,17 @@ NSString *const BFTaskMultipleExceptionsUserInfoKey = @"exceptions";
     }
 }
 
-- (void)runContinuations {
-    @synchronized(self.lock) {
-        [self.condition lock];
-        [self.condition broadcast];
-        [self.condition unlock];
-        for (void (^callback)() in self.callbacks) {
-            callback();
-        }
-        [self.callbacks removeAllObjects];
-    }
+// Try not to run the continuation callbacks while a lock is held. It generally isn't a good idea
+// to call arbitrary code while holding a lock.
+// NB: Make sure to hold the lock before calling this method!
+- (NSArray *)getAndResetContinuations {
+    [self.condition lock];
+    [self.condition broadcast];
+    [self.condition unlock];
+
+    NSArray *callbacks = self.callbacks.copy;
+    [self.callbacks removeAllObjects];
+    return callbacks;
 }
 
 #pragma mark - Chaining methods
