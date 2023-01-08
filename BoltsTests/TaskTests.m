@@ -922,4 +922,51 @@
     [self waitForExpectationsWithTimeout:10.0 handler:nil];
 }
 
+// If this test doesn't fail, then the code has *probably* been fixed (we can't be sure because of the
+// inconsistent nature of race conditions).
+- (void)testDeadlockScenario {
+    const int maxCount = 5000;
+    dispatch_queue_t queue = dispatch_queue_create("com.bolts.DeadlockTestQueue", NULL);
+
+    XCTestExpectation *expectation = [self expectationWithDescription:NSStringFromSelector(_cmd)];
+
+    // This iterate block is called many times on `queue` to try coax a race condition into
+    // happening.
+    void(^iterate)(int count, id iterateBlock) = ^(int count, id iterateBlock) {
+        BFTaskCompletionSource *taskSource = [BFTaskCompletionSource taskCompletionSource];
+        [taskSource.task continueWithBlock:^id (BFTask *task) {
+            // This is the one location that can potentially cause a deadlock. If the completion
+            // callbacks of taskSource.task are run while the lock is held later when calling
+            // `continueWithBlock:` or `setResult:`, this will try to dispatch synchronously to
+            // `queue`, but the lock will be held on `queue` waiting for this block to finish
+            // running, which it never will.
+            dispatch_sync(queue, ^{});
+            return task;
+        }];
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            [taskSource setResult:nil];
+        });
+
+        // This is the other location involved in the potential deadlock. `continueWithBlock:` will
+        // lock the mutex while on `queue`.
+        [taskSource.task continueWithBlock:^id (BFTask *task) {
+            dispatch_async(queue, ^{
+                int nextCount = count + 1;
+                if (nextCount < maxCount) {
+                    void(^localIterateBlock)(int count, id iterateBlock) = iterateBlock;
+                    localIterateBlock(count + 1, iterateBlock);
+                } else {
+                    [expectation fulfill];
+                }
+            });
+            return nil;
+        }];
+    };
+    dispatch_async(queue, ^{
+        iterate(0, iterate);
+    });
+
+    [self waitForExpectationsWithTimeout:10.0 handler:nil];
+}
+
 @end
